@@ -1,80 +1,204 @@
-# Contributing
+# Contributing to PDF_QA_Bot
 
-Thanks for contributing to **pdf-qa-bot**.
+Thank you for your interest in contributing to **PDF_QA_Bot** as part of the **GDG CHARUSAT Open Source Contri Sprintathon**! 🎉
 
-## Project Structure
+---
 
-- `frontend/` — React UI (CRA)
-- `server.js` — Node/Express API gateway (upload + ask + summarize routes)
-- `rag-service/` — FastAPI + Hugging Face RAG service
+## 🚨 Contribution Rules (Strict Enforcement)
 
-## Prerequisites
+> **Read this section carefully before doing anything. Violations will result in your PR being closed without review.**
 
-- Node.js (LTS)
-- Python 3.10+
-- `pip`
+- ❌ **Do NOT open PRs for issues unless you are officially assigned**
+- ❌ **Do NOT create new issues** - issues are created and managed only by organizers
+- ❌ **PRs without a linked issue (or team number) will be closed immediately**
+- ❌ **PRs for unassigned issues will be closed without merging**
+- ❌ **Do NOT self-assign issues**
+- ✅ **One issue per contributor at a time** - finish and submit before picking another
+- ✅ **Only maintainers can assign, review, and merge PRs** - do not ask others to merge your PR
+- ✅ **Every PR must include your Team Number** in the description
+- ✅ **General improvement PRs** (bug fixes or enhancements outside existing issues) are allowed but reviewed strictly - you must still include your team number and clearly explain the change
 
-## Local Development
+---
 
-Start all three services in separate terminals.
+## 📌 Issue Policy
 
-### 1) RAG service (FastAPI)
+- Issues are **created and managed only by organizers** - do not open your own issues
+- To work on an issue, **comment on it requesting assignment** (e.g., *"I'd like to work on this, Team XX"*)
+- **Wait for a maintainer to officially assign you** before writing any code
+- Once assigned, you must submit your PR within **3-5 days** or the issue will be reassigned
+- If you're stuck or unavailable, **comment on the issue** so maintainers can help or reassign
 
+---
+
+## 🚀 Reporting Bugs or Proposing Improvements
+
+As part of this competition, **participants are not permitted to create new issues** in the repository.
+
+If you identify:
+
+- A functional bug  
+- A UI/UX inconsistency  
+- A documentation error  
+- A minor or major enhancement  
+- A refactor that improves code quality or maintainability  
+
+You must **submit a Pull Request directly**.
+
+---
+
+### 📌 Important Guidelines
+
+- ❌ Do **not** open a new issue for such findings.  
+- ✅ Submit a Pull Request with a clear and structured description.  
+- ✅ Include your **Team Number** in the PR description.  
+- ✅ Clearly explain the problem and the rationale behind your proposed change.  
+- ✅ Attach screenshots if the change affects UI.  
+
+These submissions will be treated as **General Improvement Pull Requests** and will undergo **strict review** to ensure:
+
+- Relevance to project scope  
+- Code quality and maintainability  
+- No unintended side effects  
+- Compliance with project standards  
+
+Maintainers reserve the right to close any PR that is:
+
+- Trivial or low-effort  
+- Outside the intended scope  
+- Poorly documented  
+- Not aligned with repository standards  
+
+Please ensure that your contribution is meaningful, well-tested, and professionally presented.
+
+---
+
+## 🔐 Environment Variables & API Keys
+
+This project requires access to LLM APIs (e.g., Google Gemini, OpenAI).
+
+🚨 **Do NOT commit `.env` files or any API keys to the repository.**
+🚨 **Do NOT hardcode credentials in your source code.**
+
+If you need guidance on setting up your local environment keys, refer to the [README](https://github.com/gdg-charusat/PDF_QA_Bot%23readme) or contact the organizers.
+
+---
+
+## 📋 Table of Contents
+
+* [Tech Stack](#tech-stack)
+* [Prerequisites](#prerequisites)
+* [Getting Started](#getting-started)
+* [Development Workflow](#development-workflow)
+* [Pull Request Process](#pull-request-process)
+
+---
+
+## ✅ Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+* [Python 3.10+](https://www.google.com/search?q=https://www.python.org/downloads/)
+* [pip](https://www.google.com/search?q=https://pip.pypa.io/en/stable/installation/)
+* [Git](https://git-scm.com/)
+* A Google API Key (for Gemini Pro)
+
+---
+
+## 🚀 Getting Started
+
+### Step 1: Fork and Clone
+
+1. **Fork** the [PDF_QA_Bot repository](https://www.google.com/search?q=https://github.com/gdg-charusat/PDF_QA_Bot).
+2. **Clone** your fork:
 ```bash
-cd rag-service
-python -m pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 5000 --reload
+git clone https://github.com/YOUR-USERNAME/PDF_QA_Bot.git
+cd PDF_QA_Bot
+
 ```
 
-### 2) Node backend
 
+
+### Step 2: Environment Setup
+
+1. Create a virtual environment:
 ```bash
-cd ..
-npm install
-node server.js
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
 ```
 
-### 3) Frontend
 
+2. Install dependencies:
 ```bash
-cd frontend
-npm install
-npm start
+pip install -r requirements.txt
+
 ```
 
-## Branches and Commits
 
-- Create a feature branch from `master`.
-- Keep commits focused and small.
-- Use clear commit messages (imperative tense), for example:
-  - `fix: handle missing upload file`
-  - `feat: add local HF summarization endpoint`
+3. Setup your `.env` file:
+```bash
+# Create a .env file and add your key
+GOOGLE_API_KEY=your_api_key_here
 
-## Coding Guidelines
+```
 
-- Prefer small, targeted changes.
-- Keep existing code style and naming patterns.
-- Avoid hardcoding secrets/API keys.
-- Add or update docs when behavior changes.
 
-## Testing / Validation
 
-Before opening a PR:
+### Step 3: Run the App
 
-- Verify frontend compiles and loads.
-- Verify backend starts and `/upload`, `/ask`, and `/summarize` work end-to-end.
-- Check FastAPI logs for runtime errors.
+```bash
+streamlit run app.py
 
-## Pull Requests
+```
 
-Please include:
+---
 
-- What changed
-- Why it changed
-- How you tested it
-- Any screenshots (if UI changes)
+## 💻 Development Workflow
 
-## Security Notes
+### 1. Branch Naming Convention
 
-- Never commit real credentials in code or `.env`.
-- Use environment variables for model/API config.
+Always work on a new branch. Never push directly to `main`.
+
+* `feature/` (e.g., `feature/add-multi-pdf-support`)
+* `fix/` (e.g., `fix/sidebar-overlap`)
+* `docs/` (e.g., `docs/update-installation-steps`)
+
+### 2. Commit Format
+
+We follow the **Conventional Commits** standard:
+
+* `feat:` — A new feature
+* `fix:` — A bug fix
+* `docs:` — Documentation only changes
+* `refactor:` — Code change that neither fixes a bug nor adds a feature
+
+---
+
+## 🔄 Pull Request Process
+
+### PR Requirements
+
+Your PR will be **closed without review** if it lacks:
+
+* [ ] **Team Number** in the description.
+* [ ] **Linked Issue** (e.g., `Closes #12`).
+* [ ] **Clear Description** of what was changed and why.
+
+### Final Checklist
+
+* [ ] Code runs locally without errors.
+* [ ] `.env` is **not** included in the commit.
+* [ ] All requirements are added to `requirements.txt` (if new packages were used).
+
+---
+
+## 🆘 Need Help?
+
+* **WhatsApp**: Join the official GDG CHARUSAT event group.
+* **Maintainers**: Reach out to the organizers mentioned in the main repository.
+
+**Happy Coding! 🚀**
+
+---
+
+Would you like me to generate a **Pull Request Template** (`pull_request_template.md`) to go along with this?
