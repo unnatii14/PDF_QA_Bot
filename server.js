@@ -9,7 +9,7 @@ const session = require("express-session");
 require("dotenv").config();
 
 // ------------------------------------------------------------------
-// CONFIG
+// CONFIGURATION
 // ------------------------------------------------------------------
 const API_REQUEST_TIMEOUT = parseInt(
   process.env.API_REQUEST_TIMEOUT || "45000",
@@ -39,13 +39,13 @@ app.use(
     saveUninitialized: true,
     cookie: {
       secure: false,
-      maxAge: 1000 * 60 * 60 * 24, // 24h
+      maxAge: 1000 * 60 * 60 * 24, // 24 hours
     },
   })
 );
 
 // ------------------------------------------------------------------
-// AXIOS RETRY + TIMEOUT (PR FEATURE)
+// AXIOS RETRY CONFIG (PR FEATURE)
 // ------------------------------------------------------------------
 axiosRetry(axios, {
   retries: MAX_RETRY_ATTEMPTS,
@@ -54,48 +54,67 @@ axiosRetry(axios, {
     axiosRetry.isNetworkOrIdempotentRequestError(error) ||
     error.code === "ECONNABORTED" ||
     (error.response && error.response.status >= 500),
+  onRetry: (retryCount, error, requestConfig) => {
+    console.warn(
+      `Retry ${retryCount} for ${requestConfig.url} - ${error.message}`
+    );
+  },
 });
 
 // ------------------------------------------------------------------
-// RATE LIMITERS (MASTER FEATURE)
+// RATE LIMITERS
 // ------------------------------------------------------------------
 const uploadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
+  message: "Too many PDF uploads, try again later",
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 const askLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
+  message: "Too many questions, try again later",
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 const summarizeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
+  message: "Too many summarize requests, try again later",
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 const compareLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
+  message: "Too many compare requests, try again later",
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 // ------------------------------------------------------------------
-// MULTER
+// MULTER CONFIG
 // ------------------------------------------------------------------
 const upload = multer({ dest: "uploads/" });
 
 // ------------------------------------------------------------------
-// UPLOAD PDF
+// ROUTE: UPLOAD PDF
 // ------------------------------------------------------------------
 app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+      return res.status(400).json({
+        error: "No file uploaded. Use form field name 'file'.",
+      });
     }
 
     const { sessionId } = req.body;
     if (!sessionId) {
-      return res.status(400).json({ error: "Missing sessionId" });
+      return res.status(400).json({ error: "Missing sessionId." });
     }
 
     const filePath = path.join(__dirname, req.file.path);
@@ -108,21 +127,27 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
 
     res.json({ message: "PDF uploaded & processed successfully" });
   } catch (err) {
+    console.error("Upload failed:", err.response?.data || err.message);
+
     if (err.code === "ECONNABORTED") {
-      return res.status(504).json({ error: "Upload timed out" });
+      return res.status(504).json({
+        error: "PDF processing timed out",
+      });
     }
+
     res.status(500).json({ error: "Upload failed" });
   }
 });
 
 // ------------------------------------------------------------------
-// ASK QUESTION
+// ROUTE: ASK QUESTION
 // ------------------------------------------------------------------
 app.post("/ask", askLimiter, async (req, res) => {
   const { question, sessionId } = req.body;
 
+  // ---- Input validation ----
   if (!sessionId) {
-    return res.status(400).json({ error: "Missing sessionId" });
+    return res.status(400).json({ error: "Missing sessionId." });
   }
 
   if (!question || typeof question !== "string" || !question.trim()) {
@@ -160,15 +185,18 @@ app.post("/ask", askLimiter, async (req, res) => {
 
     res.json({ answer: response.data.answer });
   } catch (err) {
+    console.error("Ask failed:", err.response?.data || err.message);
+
     if (err.code === "ECONNABORTED") {
-      return res.status(504).json({ error: "Request timed out" });
+      return res.status(504).json({ error: "Question timed out" });
     }
+
     res.status(500).json({ error: "Error answering question" });
   }
 });
 
 // ------------------------------------------------------------------
-// CLEAR CHAT HISTORY
+// ROUTE: CLEAR HISTORY
 // ------------------------------------------------------------------
 app.post("/clear-history", (req, res) => {
   if (req.session) {
@@ -178,12 +206,13 @@ app.post("/clear-history", (req, res) => {
 });
 
 // ------------------------------------------------------------------
-// SUMMARIZE
+// ROUTE: SUMMARIZE
 // ------------------------------------------------------------------
 app.post("/summarize", summarizeLimiter, async (req, res) => {
   const { sessionId } = req.body || {};
+
   if (!sessionId) {
-    return res.status(400).json({ error: "Missing sessionId" });
+    return res.status(400).json({ error: "Missing sessionId." });
   }
 
   try {
@@ -192,17 +221,21 @@ app.post("/summarize", summarizeLimiter, async (req, res) => {
       { session_id: sessionId },
       { timeout: API_REQUEST_TIMEOUT }
     );
+
     res.json({ summary: response.data.summary });
   } catch (err) {
+    console.error("Summarize failed:", err.response?.data || err.message);
+
     if (err.code === "ECONNABORTED") {
       return res.status(504).json({ error: "Summarization timed out" });
     }
+
     res.status(500).json({ error: "Error summarizing PDF" });
   }
 });
 
 // ------------------------------------------------------------------
-// COMPARE
+// ROUTE: COMPARE
 // ------------------------------------------------------------------
 app.post("/compare", compareLimiter, async (req, res) => {
   try {
@@ -212,7 +245,8 @@ app.post("/compare", compareLimiter, async (req, res) => {
       { timeout: API_REQUEST_TIMEOUT }
     );
     res.json({ comparison: response.data.comparison });
-  } catch {
+  } catch (err) {
+    console.error("Compare failed:", err.response?.data || err.message);
     res.status(500).json({ error: "Error comparing documents" });
   }
 });

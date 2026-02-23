@@ -5,13 +5,13 @@ import { Document, Page, pdfjs } from "react-pdf";
 import "bootstrap/dist/css/bootstrap.min.css";
 import {
   Container,
-  Row,
-  Col,
   Button,
   Form,
   Card,
   Spinner,
   Navbar,
+  Row,
+  Col,
 } from "react-bootstrap";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -23,35 +23,35 @@ const API_BASE = process.env.REACT_APP_API_URL || "";
 const THEME_STORAGE_KEY = "pdf-qa-bot-theme";
 
 function App() {
-  // -----------------------------
-  // Core State
-  // -----------------------------
+  // -------------------------------
+  // Core state
+  // -------------------------------
   const [file, setFile] = useState(null);
   const [pdfs, setPdfs] = useState([]); // { name, doc_id, url }
   const [selectedDocs, setSelectedDocs] = useState([]);
+  const [question, setQuestion] = useState("");
   const [chatHistory, setChatHistory] = useState([]);
   const [comparisonResult, setComparisonResult] = useState(null);
-  const [question, setQuestion] = useState("");
 
-  // -----------------------------
-  // UI State
-  // -----------------------------
+  // -------------------------------
+  // UI state
+  // -------------------------------
   const [uploading, setUploading] = useState(false);
   const [asking, setAsking] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
   const [comparing, setComparing] = useState(false);
 
-  // -----------------------------
-  // Theme
-  // -----------------------------
+  // -------------------------------
+  // Theme persistence
+  // -------------------------------
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem(THEME_STORAGE_KEY);
     return saved ? JSON.parse(saved) : false;
   });
 
-  // -----------------------------
-  // Session Isolation
-  // -----------------------------
+  // -------------------------------
+  // Session isolation
+  // -------------------------------
   const [sessionId, setSessionId] = useState("");
 
   useEffect(() => {
@@ -67,16 +67,15 @@ function App() {
     document.body.classList.toggle("dark-mode", darkMode);
   }, [darkMode]);
 
-  // -----------------------------
+  // -------------------------------
   // Upload PDF (with timeout)
-  // -----------------------------
+  // -------------------------------
   const uploadPDF = async () => {
     if (!file) return;
 
     setUploading(true);
-
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000);
+    const timeoutId = setTimeout(() => controller.abort(), 90_000);
 
     try {
       const formData = new FormData();
@@ -90,28 +89,26 @@ function App() {
       const url = URL.createObjectURL(file);
       setPdfs((prev) => [
         ...prev,
-        { name: file.name, doc_id: res.data.doc_id, url },
+        { name: file.name, doc_id: res.data?.doc_id, url },
       ]);
 
       setFile(null);
       alert("PDF uploaded!");
     } catch (e) {
-      let msg = "Upload failed.";
       if (e.name === "AbortError" || e.code === "ECONNABORTED") {
-        msg = "Upload timed out. Try a smaller PDF.";
-      } else if (e.response?.status === 504) {
-        msg = "Gateway timeout.";
+        alert("Upload timed out. Try a smaller PDF.");
+      } else {
+        alert("Upload failed.");
       }
-      alert(msg);
     } finally {
       clearTimeout(timeoutId);
       setUploading(false);
     }
   };
 
-  // -----------------------------
-  // Toggle PDF Selection
-  // -----------------------------
+  // -------------------------------
+  // Toggle document selection
+  // -------------------------------
   const toggleDocSelection = (docId) => {
     setComparisonResult(null);
     setSelectedDocs((prev) =>
@@ -121,21 +118,22 @@ function App() {
     );
   };
 
-  // -----------------------------
-  // Ask Question (with timeout)
-  // -----------------------------
+  // -------------------------------
+  // Ask question (with timeout)
+  // -------------------------------
   const askQuestion = async () => {
     if (!question.trim() || selectedDocs.length === 0) return;
     if (question.length > 2000) {
-      alert("Question too long (max 2000 chars)");
+      alert("Question too long (max 2000 characters)");
       return;
     }
 
     setAsking(true);
     setChatHistory((prev) => [...prev, { role: "user", text: question }]);
+    setQuestion("");
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
     try {
       const res = await axios.post(
@@ -153,46 +151,43 @@ function App() {
         { role: "bot", text: res.data.answer },
       ]);
     } catch (e) {
-      let msg = "Error getting answer.";
-      if (e.name === "AbortError" || e.code === "ECONNABORTED") {
-        msg = "Request timed out.";
-      }
+      const msg =
+        e.name === "AbortError" || e.code === "ECONNABORTED"
+          ? "Request timed out."
+          : "Error getting answer.";
       setChatHistory((prev) => [...prev, { role: "bot", text: msg }]);
     } finally {
       clearTimeout(timeoutId);
-      setQuestion("");
       setAsking(false);
     }
   };
 
-  // -----------------------------
-  // Summarize
-  // -----------------------------
+  // -------------------------------
+  // Summarize PDFs
+  // -------------------------------
   const summarizePDF = async () => {
     if (selectedDocs.length === 0) return;
 
     setSummarizing(true);
-
     try {
       const res = await axios.post(`${API_BASE}/summarize`, {
         sessionId,
         doc_ids: selectedDocs,
       });
-
       setChatHistory((prev) => [
         ...prev,
         { role: "bot", text: res.data.summary },
       ]);
     } catch {
       alert("Error summarizing.");
+    } finally {
+      setSummarizing(false);
     }
-
-    setSummarizing(false);
   };
 
-  // -----------------------------
-  // Compare
-  // -----------------------------
+  // -------------------------------
+  // Compare PDFs
+  // -------------------------------
   const compareDocuments = async () => {
     if (selectedDocs.length < 2) return;
 
@@ -202,42 +197,37 @@ function App() {
         sessionId,
         doc_ids: selectedDocs,
       });
-
-      if (selectedDocs.length === 2) {
-        setComparisonResult(res.data.comparison);
-      } else {
-        setChatHistory((prev) => [
-          ...prev,
-          { role: "bot", text: res.data.comparison },
-        ]);
-      }
+      setComparisonResult(res.data.comparison);
+      setChatHistory((prev) => [
+        ...prev,
+        { role: "bot", text: res.data.comparison },
+      ]);
     } catch {
       alert("Error comparing documents.");
+    } finally {
+      setComparing(false);
     }
-    setComparing(false);
   };
 
-  const selectedPdfs = pdfs.filter((p) =>
-    selectedDocs.includes(p.doc_id)
-  );
-
+  // -------------------------------
+  // Helpers
+  // -------------------------------
+  const selectedPdfs = pdfs.filter((p) => selectedDocs.includes(p.doc_id));
   const pageBg = darkMode ? "bg-dark text-light" : "bg-light text-dark";
   const cardClass = darkMode
     ? "text-white border-secondary shadow"
     : "bg-white text-dark border-0 shadow-sm";
+  const inputClass = darkMode ? "text-white border-secondary" : "";
 
-  // -----------------------------
+  // -------------------------------
   // Render
-  // -----------------------------
+  // -------------------------------
   return (
     <div className={pageBg} style={{ minHeight: "100vh" }}>
       <Navbar bg={darkMode ? "dark" : "primary"} variant="dark">
         <Container className="d-flex justify-content-between">
           <Navbar.Brand>🤖 PDF Q&A Bot</Navbar.Brand>
-          <Button
-            variant="outline-light"
-            onClick={() => setDarkMode(!darkMode)}
-          >
+          <Button variant="outline-light" onClick={() => setDarkMode(!darkMode)}>
             {darkMode ? "Light" : "Dark"}
           </Button>
         </Container>
@@ -250,6 +240,7 @@ function App() {
             <Form>
               <Form.Control
                 type="file"
+                className={inputClass}
                 onChange={(e) => setFile(e.target.files[0])}
               />
               <Button
@@ -263,7 +254,7 @@ function App() {
           </Card.Body>
         </Card>
 
-        {/* Selection */}
+        {/* Document selection */}
         {pdfs.length > 0 && (
           <Card className={`mb-4 ${cardClass}`}>
             <Card.Body>
@@ -271,6 +262,7 @@ function App() {
               {pdfs.map((pdf) => (
                 <Form.Check
                   key={pdf.doc_id}
+                  type="checkbox"
                   label={pdf.name}
                   checked={selectedDocs.includes(pdf.doc_id)}
                   onChange={() => toggleDocSelection(pdf.doc_id)}
@@ -280,7 +272,7 @@ function App() {
           </Card>
         )}
 
-        {/* Side-by-side view */}
+        {/* Side-by-side preview */}
         {selectedPdfs.length === 2 && (
           <Row className="mb-4">
             {selectedPdfs.map((pdf) => (
@@ -301,7 +293,7 @@ function App() {
         {/* Chat */}
         <Card className={cardClass}>
           <Card.Body>
-            <div style={{ maxHeight: 300, overflowY: "auto" }}>
+            <div style={{ maxHeight: 300, overflowY: "auto", marginBottom: 16 }}>
               {chatHistory.map((msg, i) => (
                 <div key={i} className="mb-2">
                   <strong>{msg.role === "user" ? "You" : "Bot"}:</strong>
@@ -310,13 +302,22 @@ function App() {
               ))}
             </div>
 
-            <Form className="d-flex gap-2 mt-3">
+            <Form
+              className="d-flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                askQuestion();
+              }}
+            >
               <Form.Control
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
+                type="text"
                 placeholder="Ask a question..."
+                value={question}
+                className={inputClass}
+                onChange={(e) => setQuestion(e.target.value)}
+                disabled={asking}
               />
-              <Button onClick={askQuestion} disabled={asking}>
+              <Button disabled={asking || !question.trim()}>
                 {asking ? <Spinner size="sm" /> : "Ask"}
               </Button>
             </Form>
@@ -328,7 +329,7 @@ function App() {
                 onClick={summarizePDF}
                 disabled={summarizing}
               >
-                Summarize
+                {summarizing ? <Spinner size="sm" /> : "Summarize"}
               </Button>
 
               <Button
@@ -336,7 +337,7 @@ function App() {
                 onClick={compareDocuments}
                 disabled={selectedDocs.length < 2 || comparing}
               >
-                Compare
+                {comparing ? <Spinner size="sm" /> : "Compare"}
               </Button>
             </div>
           </Card.Body>
