@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from "react";
 import axios from "axios";
 import ReactMarkdown from "react-markdown";
@@ -22,18 +23,19 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
 // Theme persistence key
-const THEME_STORAGE_KEY = 'pdf-qa-bot-theme';
+const THEME_STORAGE_KEY = "pdf-qa-bot-theme";
 
 function App() {
   const [file, setFile] = useState(null);
-  const [pdfs, setPdfs] = useState([]); // {name, url, chat: [], processed: false}
-  const [selectedPdf, setSelectedPdf] = useState(null);
+  const [pdfs, setPdfs] = useState([]); // {name, doc_id, url}
+  const [selectedDocs, setSelectedDocs] = useState([]);
+  const [chatHistory, setChatHistory] = useState([]);
+  const [comparisonResult, setComparisonResult] = useState(null);
   const [question, setQuestion] = useState("");
   const [uploading, setUploading] = useState(false);
   const [asking, setAsking] = useState(false);
-  const [processingPdf, setProcessingPdf] = useState(false); // Track PDF processing status
+  const [processingPdf, setProcessingPdf] = useState(false);
   const [darkMode, setDarkMode] = useState(() => {
-    // Load theme preference from localStorage
     const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
     return savedTheme ? JSON.parse(savedTheme) : false;
   });
@@ -41,26 +43,35 @@ function App() {
   const [pageNumber, setPageNumber] = useState(1);
   const [summarizing, setSummarizing] = useState(false);
   const [comparing, setComparing] = useState(false);
-  const [darkMode, setDarkMode] = useState(() => {
-    return localStorage.getItem("darkMode") === "true";
-  });
+  const [sessionId, setSessionId] = useState("");
+
+  // Generate a session ID on mount (fix-data-leakage)
+  useEffect(() => {
+    setSessionId(
+      crypto.randomUUID
+        ? crypto.randomUUID()
+        : Math.random().toString(36).substring(2, 15),
+    );
+  }, []);
+
   // Save theme preference when it changes
   useEffect(() => {
     localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(darkMode));
-    // Update document body class for global styling
-    document.body.classList.toggle('dark-mode', darkMode);
+    document.body.classList.toggle("dark-mode", darkMode);
   }, [darkMode]);
 
-  // Multi-PDF upload
+  // ===============================
+  // Upload
+  // ===============================
   const uploadPDF = async () => {
     if (!file) return;
     setUploading(true);
     setProcessingPdf(true);
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("sessionId", sessionId);
     try {
-      // Upload and process PDF
-      await axios.post(`${API_BASE}/upload`, formData);
+      const res = await axios.post(`${API_BASE}/upload`, formData);
       const url = URL.createObjectURL(file);
       setPdfs((prev) => [
         ...prev,
@@ -72,6 +83,7 @@ function App() {
       alert("Upload failed.");
     }
     setUploading(false);
+    setProcessingPdf(false);
   };
 
   // ===============================
@@ -92,12 +104,13 @@ function App() {
   const askQuestion = async () => {
     if (!question.trim() || selectedDocs.length === 0) return;
     setChatHistory((prev) => [...prev, { role: "user", text: question }]);
-setQuestion("");
-setAsking(true);
+    setQuestion("");
+    setAsking(true);
     try {
       const res = await axios.post(`${API_BASE}/ask`, {
         question,
         doc_ids: selectedDocs,
+        sessionId,
       });
       setChatHistory((prev) => [
         ...prev,
@@ -109,17 +122,19 @@ setAsking(true);
         { role: "bot", text: "Error getting answer." },
       ]);
     }
-    // setQuestion("");
-setAsking(false);
+    setAsking(false);
   };
 
-  // Summarization
+  // ===============================
+  // Summarize
+  // ===============================
   const summarizePDF = async () => {
     if (selectedDocs.length === 0) return;
     setSummarizing(true);
     try {
       const res = await axios.post(`${API_BASE}/summarize`, {
         doc_ids: selectedDocs,
+        sessionId,
       });
       setChatHistory((prev) => [
         ...prev,
@@ -140,6 +155,7 @@ setAsking(false);
     try {
       const res = await axios.post(`${API_BASE}/compare`, {
         doc_ids: selectedDocs,
+        sessionId,
       });
       if (selectedDocs.length === 2) {
         setComparisonResult(res.data.comparison);
@@ -204,10 +220,7 @@ setAsking(false);
                 role="switch"
                 id="darkModeToggle"
                 checked={darkMode}
-                onChange={() => {
-                  setDarkMode(!darkMode);
-                  localStorage.setItem("darkMode", !darkMode);
-                }}
+                onChange={() => setDarkMode(!darkMode)}
                 aria-label="Toggle dark/light mode"
                 style={{ cursor: "pointer", width: "40px", height: "22px" }}
               />
@@ -318,14 +331,22 @@ setAsking(false);
                 ))}
               </div>
 
-              <Form className="d-flex gap-2 mb-3" onSubmit={(e) => e.preventDefault()}>
+              <Form
+                className="d-flex gap-2 mb-3"
+                onSubmit={(e) => e.preventDefault()}
+              >
                 <Form.Control
-  type="text"
-  placeholder="Ask a question..."
-  className={inputClass}
-  value={question}
-  onChange={(e) => setQuestion(e.target.value)}
-  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); askQuestion(); } }}
+                  type="text"
+                  placeholder="Ask a question..."
+                  className={inputClass}
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      askQuestion();
+                    }
+                  }}
                 />
                 <Button
                   variant="success"
@@ -336,7 +357,11 @@ setAsking(false);
                 </Button>
               </Form>
 
-              <Button variant="warning" className="me-2" onClick={summarizePDF}>
+              <Button
+                variant="warning"
+                className="me-2"
+                onClick={summarizePDF}
+              >
                 {summarizing ? (
                   <Spinner size="sm" animation="border" />
                 ) : (
