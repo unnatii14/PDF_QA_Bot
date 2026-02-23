@@ -29,7 +29,6 @@ import docx
 # -------------------------------------------------------------------
 load_dotenv()
 app = FastAPI()
-
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
@@ -301,7 +300,7 @@ def cleanup_expired_sessions():
 @limiter.limit("15/15 minutes")
 def process_pdf(request: Request, data: DocumentPath):
     cleanup_expired_sessions()
-
+    
     if not os.path.exists(data.filePath):
         raise HTTPException(status_code=404, detail="Document not found")
 
