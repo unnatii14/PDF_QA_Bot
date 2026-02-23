@@ -67,10 +67,10 @@ function App() {
     document.body.classList.toggle("dark-mode", darkMode);
   }, [darkMode]);
 
-  // -------------------------------
-  // Upload PDF (with timeout)
-  // -------------------------------
-  const uploadPDF = async () => {
+  // ===============================
+  // Upload
+  // ===============================
+  const uploadDocument = async () => {
     if (!file) return;
 
     setUploading(true);
@@ -87,16 +87,22 @@ function App() {
       });
 
       const url = URL.createObjectURL(file);
+      const dotIndex = file.name.lastIndexOf(".");
+      const ext =
+        dotIndex !== -1 && dotIndex < file.name.length - 1
+          ? file.name.substring(dotIndex + 1).toLowerCase()
+          : "";
+
       setPdfs((prev) => [
         ...prev,
         { name: file.name, doc_id: res.data?.doc_id, url, ext },
       ]);
 
       setFile(null);
-      alert("PDF uploaded!");
+      alert("Document uploaded!");
     } catch (e) {
       if (e.name === "AbortError" || e.code === "ECONNABORTED") {
-        alert("Upload timed out. Try a smaller PDF.");
+        alert("Upload timed out. Try a smaller document.");
       } else {
         alert("Upload failed.");
       }
@@ -148,7 +154,7 @@ function App() {
 
       setChatHistory((prev) => [
         ...prev,
-        { role: "bot", text: res.data.answer },
+        { role: "bot", text: res.data.answer, confidence: res.data.confidence_score },
       ]);
     } catch (e) {
       const msg =
@@ -276,77 +282,112 @@ function App() {
             </Card.Body>
           </Card>
         )}
-
-        {/* Side-by-side preview */}
+        {/* Side-by-side comparison when 2 docs selected */}
         {selectedPdfs.length === 2 && (
-          <Row className="mb-4">
-            {selectedPdfs.map((pdf) => (
-              <Col md={6} key={pdf.doc_id}>
-                <Card className={cardClass}>
-                  <Card.Body>
-                    <h6>{pdf.name}</h6>
-                    <Document file={pdf.url}>
-                      <Page pageNumber={1} />
-                    </Document>
-                  </Card.Body>
-                </Card>
-              </Col>
-            ))}
-          </Row>
+          <>
+            <Card className={`mb-4 ${cardClass}`}>
+              <Card.Body>
+                <Button
+                  variant="info"
+                  onClick={compareDocuments}
+                  disabled={comparing}
+                >
+                  {comparing ? (
+                    <Spinner size="sm" animation="border" />
+                  ) : (
+                    "Generate Comparison"
+                  )}
+                </Button>
+
+                {comparisonResult && (
+                  <div className="mt-4">
+                    <h5>AI Comparison</h5>
+                    <ReactMarkdown>{comparisonResult}</ReactMarkdown>
+                  </div>
+                )}
+              </Card.Body>
+            </Card>
+          </>
         )}
 
-        {/* Chat */}
-        <Card className={cardClass}>
-          <Card.Body>
-            <div style={{ maxHeight: 300, overflowY: "auto", marginBottom: 16 }}>
-              {chatHistory.map((msg, i) => (
-                <div key={i} className="mb-2">
-                  <strong>{msg.role === "user" ? "You" : "Bot"}:</strong>
-                  <ReactMarkdown>{msg.text}</ReactMarkdown>
-                </div>
-              ))}
-            </div>
-
-            <Form
-              className="d-flex gap-2"
-              onSubmit={(e) => {
-                e.preventDefault();
-                askQuestion();
-              }}
-            >
-              <Form.Control
-                type="text"
-                placeholder="Ask a question..."
-                value={question}
-                className={inputClass}
-                onChange={(e) => setQuestion(e.target.value)}
-                disabled={asking}
-              />
-              <Button disabled={asking || !question.trim()}>
-                {asking ? <Spinner size="sm" /> : "Ask"}
-              </Button>
-            </Form>
-
-            <div className="mt-3">
-              <Button
-                variant="warning"
-                className="me-2"
-                onClick={summarizePDF}
-                disabled={summarizing}
+        {/* Chat Mode */}
+        {selectedPdfs.length !== 2 && (
+          <Card className={cardClass}>
+            <Card.Body>
+              <h5>Ask Across Selected Documents</h5>
+              <div
+                style={{ maxHeight: 300, overflowY: "auto", marginBottom: 16 }}
               >
-                {summarizing ? <Spinner size="sm" /> : "Summarize"}
-              </Button>
+                {chatHistory.map((msg, i) => (
+                  <div key={i} className="mb-2">
+                    <strong>{msg.role === "user" ? "You" : "Bot"}:</strong>
+                    {msg.role === "bot" && msg.confidence !== undefined && (
+                      <span
+                        className="badge ms-2"
+                        style={{
+                          backgroundColor:
+                            msg.confidence >= 70 ? "#28a745"
+                              : msg.confidence >= 40 ? "#ffc107"
+                                : "#dc3545",
+                          color: msg.confidence >= 40 && msg.confidence < 70 ? "#856404" : "#fff",
+                          fontSize: "0.7rem"
+                        }}
+                      >
+                        Confidence: {msg.confidence}%
+                      </span>
+                    )}
+                    <ReactMarkdown>{msg.text}</ReactMarkdown>
+                  </div>
+                ))}
+              </div>
 
-              <Button
-                variant="info"
-                onClick={compareDocuments}
-                disabled={selectedDocs.length < 2 || comparing}
+              <Form
+                className="d-flex gap-2 mb-3"
+                onSubmit={(e) => e.preventDefault()}
               >
-                {comparing ? <Spinner size="sm" /> : "Compare"}
-              </Button>
-            </div>
-          </Card.Body>
-        </Card>
+                <Form.Control
+                  type="text"
+                  placeholder="Ask a question..."
+                  className={inputClass}
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      askQuestion();
+                    }
+                  }}
+                />
+                <Button
+                  variant="success"
+                  onClick={askQuestion}
+                  disabled={asking}
+                >
+                  {asking ? <Spinner size="sm" animation="border" /> : "Ask"}
+                </Button>
+              </Form>
+
+              <div className="mt-3">
+                <Button
+                  variant="warning"
+                  className="me-2"
+                  onClick={summarizePDF}
+                  disabled={summarizing}
+                >
+                  {summarizing ? <Spinner size="sm" /> : "Summarize"}
+                </Button>
+
+                <Button
+                  variant="info"
+                  onClick={compareDocuments}
+                  disabled={selectedDocs.length < 2 || comparing}
+                >
+                  {comparing ? <Spinner size="sm" /> : "Compare"}
+                </Button>
+              </div>
+            </Card.Body>
+          </Card>
+        )}
       </Container>
     </div>
   );

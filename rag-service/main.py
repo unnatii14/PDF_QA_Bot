@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------------
 # CONFIG
 # -------------------------------------------------------------------
-HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
+HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-small")
 LLM_GENERATION_TIMEOUT = int(os.getenv("LLM_GENERATION_TIMEOUT", "30"))
 
 SESSION_TIMEOUT = 3600  # 1 hour
@@ -335,32 +335,123 @@ def process_pdf(request: Request, data: DocumentPath):
     return {"message": "PDF processed successfully"}
 
 
+# ===============================
+# RELEVANCE CONFIGURATION
+# ===============================
+# Uses cosine similarity (0 to 1) instead of raw L2 distance.
+# 0.0 = completely unrelated, 1.0 = identical match.
+# NOTE: The conversion from FAISS scores to cosine similarity assumes that
+# embeddings are L2-normalized and that FAISS uses IndexFlatL2 (L2 squared).
+RELEVANCE_THRESHOLD = 0.25  # Minimum cosine similarity for relevance
+
+
+def faiss_score_to_cosine_sim(score: float) -> float:
+    """Convert a FAISS L2 squared distance score to cosine similarity.
+
+    Assumptions:
+    - Embedding vectors are L2-normalized (||v|| = 1). True for many
+      sentence-transformer models including all-MiniLM-L6-v2.
+    - The FAISS index returns L2 squared distances (e.g., IndexFlatL2).
+
+    Under these conditions:
+        ||u - v||^2 = 2 - 2 * cos(theta)
+        => cos(theta) = 1 - (||u - v||^2 / 2)
+
+    The returned value is clamped to [0.0, 1.0] for numerical stability.
+    """
+    return max(0.0, 1.0 - score / 2.0)
+
+
+def compute_confidence(faiss_scores: list[float]) -> float:
+    """Compute confidence (0-100%) from FAISS scores using the top-3 chunks.
+
+    The provided FAISS scores are assumed to be L2 squared distances for
+    L2-normalized embeddings (see ``faiss_score_to_cosine_sim``). Scores are
+    converted to cosine similarities and the top-3 most relevant chunks are
+    averaged to produce a confidence value in percent.
+    """
+    if not faiss_scores:
+        return 0.0
+    top_scores = sorted(faiss_scores)[:3]
+    similarities = [faiss_score_to_cosine_sim(s) for s in top_scores]
+    avg_sim = sum(similarities) / len(similarities)
+    return round(float(avg_sim * 100), 1)
+
+
 @app.post("/ask")
 @limiter.limit("60/15 minutes")
 def ask_question(request: Request, data: AskRequest):
     cleanup_expired_sessions()
 
-    session = sessions.get(data.session_id)
-    if not session:
-        return {"answer": "Session expired or PDF not uploaded"}
+    session_data = sessions.get(data.session_id)
+    if not session_data:
+        return {"answer": "Session expired or no PDF uploaded for this session!", "confidence_score": 0}
 
-    session["last_accessed"] = time.time()
-    vectorstore = session["vectorstore"]
+    session_data["last_accessed"] = time.time()
+    vectorstore = session_data["vectorstore"]
 
-    docs = vectorstore.similarity_search(data.question, k=4)
-    if not docs:
-        return {"answer": "No relevant context found."}
+    question = data.question
+    history = data.history
+    conversation_context = ""
+    # Use only last 5 messages to avoid long prompts
+    for msg in history[-5:]:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        conversation_context += f"{role}: {content}\n"
 
-    context = "\n\n".join(doc.page_content for doc in docs)
+    # Use similarity_search_with_score to get FAISS L2 squared distances
+    docs_with_scores = vectorstore.similarity_search_with_score(question, k=4)
+    if not docs_with_scores:
+        return {"answer": "No relevant context found.", "confidence_score": 0}
 
-    prompt = (
-        "You are a helpful assistant answering ONLY from the document context below.\n\n"
-        f"Context:\n{context}\n\n"
-        f"Question: {data.question}\nAnswer:"
-    )
+    # Convert FAISS scores to cosine similarities once (avoid redundant computation)
+    scored = [(doc, score, faiss_score_to_cosine_sim(score)) for doc, score in docs_with_scores]
+    similarities = [sim for _, _, sim in scored]
+    top3_sims = sorted(similarities, reverse=True)[:3]
+    top3_avg_sim = sum(top3_sims) / len(top3_sims)
+    confidence = round(float(top3_avg_sim * 100), 1)
 
-    answer = generate_response(prompt, max_new_tokens=256)
-    return {"answer": normalize_answer(answer)}
+    # Reject if top-3 average cosine similarity is below threshold
+    if top3_avg_sim < RELEVANCE_THRESHOLD:
+        return {
+            "answer": "I cannot answer this question based on the uploaded document. "
+                      "The question appears to be unrelated to the document content.",
+            "confidence_score": confidence
+        }
+
+    # Filter to only keep chunks above relevance threshold
+    relevant_docs = [doc for doc, _, sim in scored if sim >= RELEVANCE_THRESHOLD]
+    # At least one doc must pass since top3_avg_sim >= RELEVANCE_THRESHOLD
+    assert relevant_docs, "Invariant violated: relevant_docs should not be empty"
+
+    # Context is already clean (normalized at ingestion)
+    context = "\n\n".join([d.page_content for d in relevant_docs])
+
+    prompt = f"""
+    You are a helpful assistant answering ONLY from the document context below.
+
+    Conversation History:
+    {conversation_context}
+
+    Document Context:
+    {context}
+
+    Current Question:
+    {question}
+
+    Instructions:
+    - Use the document context to answer.
+    - If the answer is not in the document, say so briefly.
+    - Keep the answer concise.
+
+    Answer:
+    """
+
+    raw_answer = generate_response(prompt, max_new_tokens=128)
+
+    # ── Layer 3: post-process the answer itself ───────────────────────────────
+    answer = normalize_answer(raw_answer)
+    return {"answer": answer, "confidence_score": confidence}
 
 
 @app.post("/summarize")
