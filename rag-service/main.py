@@ -27,10 +27,24 @@ app = FastAPI()
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
-# Session Management (fix-data-leakage: per-session vectorstores)
-sessions = {}  # Format: { "session_id": { "vectorstore": FAISS, "last_accessed": float } }
-SESSION_TIMEOUT = 3600  # 1 hour
+# ---------------------------------------------------------------------------
+# GROQ CLIENT SETUP
+# ---------------------------------------------------------------------------
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+if not GROQ_API_KEY:
+    raise RuntimeError(
+        "GROQ_API_KEY is not set. Please add it to your .env file.\n"
+        "Get a free key at https://console.groq.com"
+    )
+
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+# Temporary global variables
+vectorstore = None
+qa_chain = False
 HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
@@ -80,60 +94,61 @@ def normalize_answer(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# MODEL LOADING & GENERATION
+# GROQ-BASED RESPONSE GENERATION
 # ---------------------------------------------------------------------------
 
-def load_generation_model():
-    global generation_tokenizer, generation_model, generation_is_encoder_decoder
-    if generation_model is not None and generation_tokenizer is not None:
-        return generation_tokenizer, generation_model, generation_is_encoder_decoder
+_CCC_SYSTEM = (
+    "You are an intelligent PDF Question Answering Assistant.\n"
+    "Your task is to answer the user's question strictly using the provided context "
+    "retrieved from uploaded documents.\n\n"
+    "Follow the CCC communication structure in a SINGLE response:\n\n"
+    "1. Context Connection — Start with a short professional greeting (e.g. \"Hello,\").\n"
+    "2. Content Explanation — Rewrite the retrieved context in clear, meaningful, "
+    "grammatically correct sentences. Do NOT copy text directly.\n"
+    "3. Core Answer — Present the main explanation in a structured, readable format.\n"
+    "4. Call to Action — End with a relevant follow-up question to encourage further exploration.\n\n"
+    "Rules:\n"
+    "- Use ONLY the provided context. Do NOT add external knowledge.\n"
+    "- If the answer is not in the context, say: "
+    "\"The uploaded document does not contain sufficient information to answer this question.\"\n"
+    "- Maintain a clear, professional tone.\n"
+    "- Produce one continuous response — no bullet headers like '1.' or '2.'."
+)
 
-    config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)
-    generation_is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
-    generation_tokenizer = AutoTokenizer.from_pretrained(HF_GENERATION_MODEL)
+_CCC_USER_TEMPLATE = """\
+Context from the uploaded PDF:
+{context}
 
-    if generation_is_encoder_decoder:
-        generation_model = AutoModelForSeq2SeqLM.from_pretrained(
-            HF_GENERATION_MODEL,
-            low_cpu_mem_usage=False
-        )
-    else:
-        generation_model = AutoModelForCausalLM.from_pretrained(
-            HF_GENERATION_MODEL,
-            low_cpu_mem_usage=False
-        )
+Question:
+{question}
 
-    if torch.cuda.is_available():
-        generation_model = generation_model.to("cuda")
+Final Answer:"""
 
-    generation_model.eval()
-    return generation_tokenizer, generation_model, generation_is_encoder_decoder
+CCC_PROMPT = PromptTemplate(
+    input_variables=["context", "question"],
+    template=_CCC_USER_TEMPLATE,
+)
 
 
-def generate_response(prompt: str, max_new_tokens: int) -> str:
-    tokenizer, model, is_encoder_decoder = load_generation_model()
-    model_device = next(model.parameters()).device
+# ---------------------------------------------------------------------------
+# GROQ GENERATION
+# ---------------------------------------------------------------------------
 
-    encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-    encoded = {key: value.to(model_device) for key, value in encoded.items()}
-    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-
-    with torch.no_grad():
-        generated_ids = model.generate(
-            **encoded,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=pad_token_id,
-        )
-
-    if is_encoder_decoder:
-        text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        return text.strip()
-
-    input_len = encoded["input_ids"].shape[1]
-    new_tokens = generated_ids[0][input_len:]
-    text = tokenizer.decode(new_tokens, skip_special_tokens=True)
-    return text.strip()
+def generate_response(system_prompt: str, user_prompt: str, max_tokens: int = 600) -> str:
+    """
+    Calls the Groq chat-completions API with a system + user message pair.
+    Returns the assistant's reply as a plain string.
+    """
+    completion = groq_client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        max_tokens=max_tokens,
+        temperature=0.3,     # low temp = factual, grounded answers
+    )
+    return completion.choices[0].message.content.strip()
 
 
 # ---------------------------------------------------------------------------
