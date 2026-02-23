@@ -63,12 +63,36 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
 
     const filePath = path.join(__dirname, req.file.path);
 
-    // Send PDF to Python service
-    await axios.post("http://localhost:5000/process-pdf", {
+    // **CRITICAL**: Clear session and reset backend state before processing new PDF
+    // This prevents cross-document context leakage
+    if (req.session) {
+      req.session.chatHistory = [];
+      req.session.currentPdfSessionId = null;
+    }
+
+    // Reset backend state through the /reset endpoint
+    try {
+      await axios.post("http://localhost:5000/reset");
+    } catch (resetError) {
+      console.warn("Warning: Could not reset backend state:", resetError.message);
+      // Continue with PDF upload even if reset fails
+    }
+
+    // Send PDF to Python service for processing
+    const uploadResponse = await axios.post("http://localhost:5000/process-pdf", {
       filePath: filePath,
     });
 
-    res.json({ message: "PDF uploaded & processed successfully!" });
+    // Store the new PDF session ID for future validation
+    if (uploadResponse.data.session_id && req.session) {
+      req.session.currentPdfSessionId = uploadResponse.data.session_id;
+    }
+
+    res.json({
+      message: "PDF uploaded & processed successfully!",
+      session_id: uploadResponse.data.session_id,
+      details: uploadResponse.data
+    });
   } catch (err) {
     const details = err.response?.data || err.message;
     console.error("Upload processing failed:", details);
@@ -119,8 +143,32 @@ app.post("/clear-history", (req, res) => {
   // Clear only this user's session history
   if (req.session) {
     req.session.chatHistory = [];
+    req.session.currentPdfSessionId = null;
   }
-  res.json({ message: "History cleared" });
+  res.json({ message: "Chat history cleared" });
+});
+
+app.get("/pdf-status", async (req, res) => {
+  try {
+    // Check backend PDF status
+    const statusResponse = await axios.get("http://localhost:5000/status");
+    
+    // Include frontend session status
+    const frontendStatus = {
+      hasSession: !!req.session,
+      hasHistory: req.session?.chatHistory?.length > 0 || false,
+      historyLength: req.session?.chatHistory?.length || 0,
+      currentSessionId: req.session?.currentPdfSessionId || null
+    };
+
+    res.json({
+      backend: statusResponse.data,
+      frontend: frontendStatus
+    });
+  } catch (err) {
+    console.error("Error fetching PDF status:", err.message);
+    res.status(500).json({ error: "Could not fetch PDF status" });
+  }
 });
 
 app.post("/summarize", summarizeLimiter, async (req, res) => {
