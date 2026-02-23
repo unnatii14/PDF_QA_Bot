@@ -21,31 +21,43 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
+// Theme persistence key
+const THEME_STORAGE_KEY = 'pdf-qa-bot-theme';
+
 function App() {
   const [file, setFile] = useState(null);
-  const [pdfs, setPdfs] = useState([]);
-  const [selectedDocs, setSelectedDocs] = useState([]);
-  const [chatHistory, setChatHistory] = useState([]);
-  const [comparisonResult, setComparisonResult] = useState(null);
+  const [pdfs, setPdfs] = useState([]); // {name, url, chat: [], processed: false}
+  const [selectedPdf, setSelectedPdf] = useState(null);
   const [question, setQuestion] = useState("");
   const [uploading, setUploading] = useState(false);
   const [asking, setAsking] = useState(false);
-  const [summarizing, setSummarizing] = useState(false);
-  const [comparing, setComparing] = useState(false);
+  const [processingPdf, setProcessingPdf] = useState(false); // Track PDF processing status
   const [darkMode, setDarkMode] = useState(() => {
-    return localStorage.getItem("darkMode") === "true";
+    // Load theme preference from localStorage
+    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+    return savedTheme ? JSON.parse(savedTheme) : false;
   });
+  const [numPages, setNumPages] = useState(null);
+  const [pageNumber, setPageNumber] = useState(1);
+  const [summarizing, setSummarizing] = useState(false);
 
-  // ===============================
-  // Upload
-  // ===============================
+  // Save theme preference when it changes
+  useEffect(() => {
+    localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(darkMode));
+    // Update document body class for global styling
+    document.body.classList.toggle('dark-mode', darkMode);
+  }, [darkMode]);
+
+  // Multi-PDF upload
   const uploadPDF = async () => {
     if (!file) return;
     setUploading(true);
+    setProcessingPdf(true);
     const formData = new FormData();
     formData.append("file", file);
     try {
-      const res = await axios.post(`${API_BASE}/upload`, formData);
+      // Upload and process PDF
+      await axios.post(`${API_BASE}/upload`, formData);
       const url = URL.createObjectURL(file);
       setPdfs((prev) => [
         ...prev,
@@ -98,9 +110,7 @@ setAsking(true);
 setAsking(false);
   };
 
-  // ===============================
-  // Summarize
-  // ===============================
+  // Summarization
   const summarizePDF = async () => {
     if (selectedDocs.length === 0) return;
     setSummarizing(true);
