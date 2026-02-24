@@ -6,13 +6,12 @@ const axiosRetry = require("axios-retry").default;
 const path = require("path");
 const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
-const crypto = require("crypto");
 const { fileTypeFromFile } = require("file-type");
 const fs = require("fs");
-
-const app = express(); // Trust first proxy for rate limiting if behind a proxy
 const session = require("express-session");
 require("dotenv").config();
+
+const app = express();
 
 // ------------------------------------------------------------------
 // CONFIGURATION
@@ -84,7 +83,9 @@ const compareLimiter = rateLimit({
   max: 10,
 });
 
-// Storage for uploaded PDFs
+// ------------------------------------------------------------------
+// FILE STORAGE
+// ------------------------------------------------------------------
 const UPLOAD_DIR = path.resolve(__dirname, "uploads");
 
 if (!fs.existsSync(UPLOAD_DIR)) {
@@ -131,9 +132,40 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
       });
     }
 
-    // Generate unique sessionId
     const sessionId = crypto.randomUUID();
-    const filePath = path.join(__dirname, req.file.path);
+    const filePath = path.resolve(req.file.path);
+
+    // 🔐 Magic byte validation
+    const ext = path.extname(filePath).toLowerCase();
+    const detectedType = await fileTypeFromFile(filePath);
+
+    if (ext === ".pdf") {
+      if (!detectedType || detectedType.mime !== "application/pdf") {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: "Invalid PDF file." });
+      }
+    } else if (ext === ".docx") {
+      if (
+        !detectedType ||
+        detectedType.mime !==
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      ) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: "Invalid DOCX file." });
+      }
+    } else if (ext === ".txt" || ext === ".md") {
+      const stats = fs.statSync(filePath);
+      if (stats.size === 0) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: "File is empty." });
+      }
+    }
+
+    // 🔐 Path traversal protection
+    if (!filePath.startsWith(UPLOAD_DIR)) {
+      fs.unlinkSync(filePath);
+      return res.status(400).json({ error: "Invalid file path." });
+    }
 
     await axios.post(
       "http://localhost:5000/process-pdf",
@@ -152,18 +184,16 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
 });
 
 // ------------------------------------------------------------------
-// ROUTE: ASK QUESTION
+// ROUTE: ASK
 // ------------------------------------------------------------------
 app.post("/ask", askLimiter, async (req, res) => {
   const { question, sessionId } = req.body;
 
-  if (!sessionId) {
+  if (!sessionId)
     return res.status(400).json({ error: "Missing sessionId." });
-  }
 
-  if (!question || typeof question !== "string" || !question.trim()) {
+  if (!question || typeof question !== "string" || !question.trim())
     return res.status(400).json({ error: "Invalid question." });
-  }
 
   try {
     if (!req.session.chatHistory) {
@@ -213,9 +243,8 @@ app.post("/clear-history", (req, res) => {
 app.post("/summarize", summarizeLimiter, async (req, res) => {
   const { sessionId } = req.body;
 
-  if (!sessionId) {
+  if (!sessionId)
     return res.status(400).json({ error: "Missing sessionId." });
-  }
 
   try {
     const response = await axios.post(
@@ -226,13 +255,10 @@ app.post("/summarize", summarizeLimiter, async (req, res) => {
 
     res.json({ summary: response.data.summary });
   } catch (err) {
-    console.error("Summarize failed:", err.response?.data || err.message);
-
     if (err.code === "ECONNABORTED") {
       return res.status(504).json({ error: "Summarization timed out" });
     }
-
-    res.status(500).json({ error: "Error summarizing document" });
+    res.status(500).json({ error: "Error summarizing" });
   }
 });
 
@@ -240,11 +266,6 @@ app.post("/summarize", summarizeLimiter, async (req, res) => {
 // ROUTE: COMPARE
 // ------------------------------------------------------------------
 app.post("/compare", compareLimiter, async (req, res) => {
-  const { sessionId } = req.body;
-  if (!sessionId) {
-    return res.status(400).json({ error: "Missing sessionId." });
-  }
-
   try {
     const response = await axios.post(
       "http://localhost:5000/compare",
@@ -254,9 +275,26 @@ app.post("/compare", compareLimiter, async (req, res) => {
 
     res.json({ comparison: response.data.comparison });
   } catch (err) {
-    console.error("Compare failed:", err.response?.data || err.message);
-    res.status(500).json({ error: "Error comparing documents" });
+    res.status(500).json({ error: "Error comparing" });
   }
 });
 
-app.listen(4000, () => console.log("Backend running on http://localhost:4000"));
+// ------------------------------------------------------------------
+// ERROR HANDLING
+// ------------------------------------------------------------------
+app.use((err, req, res, next) => {
+  if (err.code === "LIMIT_FILE_SIZE") {
+    return res.status(400).json({
+      error: "File too large (max 20MB).",
+    });
+  }
+  if (err.message.includes("Unsupported file type")) {
+    return res.status(400).json({ error: err.message });
+  }
+  next(err);
+});
+
+// ------------------------------------------------------------------
+app.listen(4000, () =>
+  console.log("Backend running on http://localhost:4000")
+);
