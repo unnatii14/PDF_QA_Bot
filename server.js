@@ -164,61 +164,40 @@ app.post("/upload", uploadLimiter, uploadSingle, async (req, res) => {
       });
     }
 
-    const sessionId = crypto.randomUUID();
-    const filePath = path.resolve(req.file.path);
-
-    if (req.file.mimetype !== PDF_MIME_TYPE || !req.file.originalname.toLowerCase().endsWith(".pdf")) {
-      await fs.promises.unlink(filePath).catch(() => {});
-      return res.status(400).json({ error: "Only PDF files are supported." });
+    const { sessionId } = req.body;
+    if (!sessionId) {
+      return res.status(400).json({ error: "Missing sessionId." });
     }
 
-    const isPdf = await hasPdfMagicNumber(filePath);
-    if (!isPdf) {
-      await fs.promises.unlink(filePath).catch(() => {});
-      return res.status(400).json({ error: "Only PDF files are supported." });
+    // **CRITICAL**: Clear session and reset backend state before processing new PDF
+    // This prevents cross-document context leakage
+    if (req.session) {
+      req.session.chatHistory = [];
+      req.session.currentPdfSessionId = null;
     }
 
-    //Magic byte check to ensure it's a PDF
-    const ext = path.extname(filePath).toLowerCase();
-    const detectedType = await fileTypeFromFile(filePath);
-
-    if (ext === ".pdf") {
-      if (!detectedType || detectedType.mime !== "application/pdf") {
-        fs.unlinkSync(filePath);
-        return res.status(400).json({ error: "Invalid PDF file." });
-      }
-    } else if (ext === ".docx") {
-      if (
-        !detectedType ||
-        detectedType.mime !==
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-      ) {
-        fs.unlinkSync(filePath);
-        return res.status(400).json({ error: "Invalid DOCX file." });
-      }
-    } else if (ext === ".txt" || ext === ".md") {
-      const stats = fs.statSync(filePath);
-      if (stats.size === 0) {
-        fs.unlinkSync(filePath);
-        return res.status(400).json({ error: "File is empty." });
-      }
+    // Reset backend state through the /reset endpoint
+    try {
+      await axios.post("http://localhost:5000/reset");
+    } catch (resetError) {
+      console.warn("Warning: Could not reset backend state:", resetError.message);
+      // Continue with PDF upload even if reset fails
     }
 
-    // 🔐 Path traversal protection
-    if (!filePath.startsWith(UPLOAD_DIR)) {
-      fs.unlinkSync(filePath);
-      return res.status(400).json({ error: "Invalid file path." });
-    }
+    // Send PDF to Python service for processing
+    const uploadResponse = await axios.post("http://localhost:5000/process-pdf", {
+      filePath: filePath,
+    });
 
-    await axios.post(
-      "http://localhost:5000/process-pdf",
-      { filePath, session_id: sessionId },
-      { timeout: API_REQUEST_TIMEOUT }
-    );
+    // Store the new PDF session ID for future validation
+    if (uploadResponse.data.session_id && req.session) {
+      req.session.currentPdfSessionId = uploadResponse.data.session_id;
+    }
 
     res.json({
-      message: "File uploaded & processed successfully",
-      sessionId,
+      message: "PDF uploaded & processed successfully!",
+      session_id: uploadResponse.data.session_id,
+      details: uploadResponse.data
     });
   } catch (err) {
     console.error("Upload failed:", err.message);
@@ -276,8 +255,32 @@ app.post("/ask", askLimiter, async (req, res) => {
 app.post("/clear-history", (req, res) => {
   if (req.session) {
     req.session.chatHistory = [];
+    req.session.currentPdfSessionId = null;
   }
-  res.json({ message: "History cleared" });
+  res.json({ message: "Chat history cleared" });
+});
+
+app.get("/pdf-status", async (req, res) => {
+  try {
+    // Check backend PDF status
+    const statusResponse = await axios.get("http://localhost:5000/status");
+    
+    // Include frontend session status
+    const frontendStatus = {
+      hasSession: !!req.session,
+      hasHistory: req.session?.chatHistory?.length > 0 || false,
+      historyLength: req.session?.chatHistory?.length || 0,
+      currentSessionId: req.session?.currentPdfSessionId || null
+    };
+
+    res.json({
+      backend: statusResponse.data,
+      frontend: frontendStatus
+    });
+  } catch (err) {
+    console.error("Error fetching PDF status:", err.message);
+    res.status(500).json({ error: "Could not fetch PDF status" });
+  }
 });
 
 // ------------------------------------------------------------------

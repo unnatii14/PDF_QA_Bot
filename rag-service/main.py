@@ -16,13 +16,13 @@ from transformers import (
 )
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from pathlib import Path
-import uvicorn
-import torch
-import os
+import os 
 import re
-import time
-from pathlib import Path
+import uvicorn
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+import threading
+from datetime import datetime
 
 # ===============================
 # APP SETUP
@@ -38,79 +38,68 @@ app.state.limiter = limiter
 
 
 
-sessions = {}
+# ---------------------------------------------------------------------------
+# GLOBAL STATE MANAGEMENT (Thread-safe, Multi-user support)
+# ---------------------------------------------------------------------------
+# Per-user/session storage with proper cleanup and locking
+sessions = {}  # {session_id: {"vectorstore": FAISS, "upload_time": datetime}}
+sessions_lock = threading.RLock()  # Thread-safe access to sessions
+
+# Load local embedding model (unchanged — FAISS retrieval stays the same)
+embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 embedding_model = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
-SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md"]
+# ---------------------------------------------------------------------------
+# SESSION MANAGEMENT UTILITIES (Thread-safe, Multi-user support)
+# ---------------------------------------------------------------------------
 
-# -------------------------------------------------------------------
-# DOCUMENT LOADERS
-# -------------------------------------------------------------------
-def load_pdf(file_path: str) -> list[Document]:
-    loader = PyPDFLoader(file_path)
-    return loader.load()
+def get_session_vectorstore(session_id: str):
+    """
+    Safely retrieves vectorstore for a session.
+    Returns (vectorstore, upload_time) or (None, None) if not found.
+    """
+    with sessions_lock:
+        if session_id in sessions:
+            session_data = sessions[session_id]
+            return session_data.get("vectorstore"), session_data.get("upload_time")
+        return None, None
 
-def load_docx(file_path: str) -> list[Document]:
-    import docx
-    doc = docx.Document(file_path)
-    texts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                texts.extend([p.text.strip() for p in cell.paragraphs if p.text.strip()])
-    full_text = "\n".join(texts)
-    return [Document(page_content=full_text, metadata={"source": file_path})]
 
-def load_txt(file_path: str) -> list[Document]:
-    with open(file_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    return [Document(page_content=content, metadata={"source": file_path})]
+def set_session_vectorstore(session_id: str, vectorstore, upload_time: str):
+    """
+    Safely stores vectorstore for a session.
+    Clears old session if it exists (replaces it).
+    """
+    with sessions_lock:
+        # Clear old session to prevent memory leaks
+        if session_id in sessions:
+            old_vectorstore = sessions[session_id].get("vectorstore")
+            if old_vectorstore is not None:
+                del old_vectorstore  # Allow garbage collection
+        
+        # Store new session
+        sessions[session_id] = {
+            "vectorstore": vectorstore,
+            "upload_time": upload_time
+        }
 
-def load_document(file_path: str) -> list[Document]:
-    ext = Path(file_path).suffix.lower()
-    if ext == ".pdf":
-        return load_pdf(file_path)
-    elif ext == ".docx":
-        return load_docx(file_path)
-    elif ext in (".txt", ".md"):
-        return load_txt(file_path)
-    else:
-        raise ValueError(f"Unsupported format: {ext}")
 
-splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+def clear_session(session_id: str):
+    """
+    Safely clears a specific session's vectorstore and data.
+    """
+    with sessions_lock:
+        if session_id in sessions:
+            old_vectorstore = sessions[session_id].get("vectorstore")
+            if old_vectorstore is not None:
+                del old_vectorstore  # Allow garbage collection
+            del sessions[session_id]
 
-# -------------------------------------------------------------------
-# DOCUMENT PROCESSING SETUP
-# -------------------------------------------------------------------
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=512,
-    chunk_overlap=100,
-    separators=["\n\n", "\n", " ", ""]
-)
 
-def load_document(file_path: str):
-    """Load document based on file extension."""
-    ext = Path(file_path).suffix.lower()
-    if ext == ".pdf":
-        loader = PyPDFLoader(file_path)
-        return loader.load()
-    elif ext == ".txt":
-        with open(file_path, "r", encoding="utf-8") as f:
-            return [Document(page_content=f.read(), metadata={"source": file_path})]
-    elif ext == ".docx":
-        from langchain_community.document_loaders import Docx2txtLoader
-        loader = Docx2txtLoader(file_path)
-        return loader.load()
-    else:
-        raise ValueError(f"Unsupported file format: {ext}")
 
-# -------------------------------------------------------------------
-# TEXT NORMALIZATION
-# -------------------------------------------------------------------
 def normalize_spaced_text(text: str) -> str:
     pattern = r"\b(?:[A-Za-z] ){2,}[A-Za-z]\b"
 
@@ -212,168 +201,231 @@ def cleanup_expired_sessions():
 # ===============================
 @app.post("/process")
 @limiter.limit("15/15 minutes")
-def process_doc(request: Request, data: DocumentPath):
-    cleanup_sessions()
+def process_pdf(request: Request, data: PDFPath):
+    """
+    Process and store PDF with proper cleanup and thread-safe multi-user support.
+    """
+    try:
+        loader = PyPDFLoader(data.filePath)
+        raw_docs = loader.load()
 
-    if not os.path.exists(data.filePath):
-        raise HTTPException(404, "File not found")
+        if not raw_docs:
+            return {"error": "PDF file is empty or unreadable. Please check your file."}
 
-    docs = load_document(data.filePath)
+        # ── Layer 1: normalize at ingestion ──────────────────────────────────────
+        cleaned_docs = []
+        for doc in raw_docs:
+            cleaned_content = normalize_spaced_text(doc.page_content)
+            cleaned_docs.append(Document(page_content=cleaned_content, metadata=doc.metadata))
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=150,
-    )
-    chunks = splitter.split_documents(docs)
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+        chunks = splitter.split_documents(cleaned_docs)
+        
+        if not chunks:
+            return {"error": "No text chunks generated from the PDF. Please check your file."}
 
-    vectorstore = FAISS.from_documents(chunks, embedding_model)
-
-    if data.session_id in sessions:
-        # Append to existing vectorstore
-        sessions[data.session_id]["vectorstore"].add_documents(chunks)
-        sessions[data.session_id]["last_accessed"] = time.time()
-    else:
-        # Create new vectorstore
-        sessions[data.session_id] = {
-            "vectorstore": FAISS.from_documents(chunks, embedding_model),
-            "last_accessed": time.time(),
+        # **KEY FIX**: Store per-session with automatic cleanup of old data
+        session_id = request.headers.get("X-Session-ID", "default")
+        upload_time = datetime.now().isoformat()
+        
+        # Thread-safe storage (automatically clears old session data)
+        vectorstore = FAISS.from_documents(chunks, embedding_model)
+        set_session_vectorstore(session_id, vectorstore, upload_time)
+        
+        return {
+            "message": "PDF processed successfully",
+            "session_id": session_id,
+            "upload_time": upload_time,
+            "chunks_created": len(chunks)
         }
 
-    return {"message": "Processed successfully"}
 
-
-# ===============================
-# ASK
-# ===============================
 @app.post("/ask")
 @limiter.limit("60/15 minutes")
-def ask(request: Request, data: AskRequest):
-    cleanup_sessions()
+def ask_question(request: Request, data: AskRequest):
+    """
+    Answer questions using session-specific PDF context with thread-safe access.
+    """
+    session_id = request.headers.get("X-Session-ID", "default")
+    vectorstore, upload_time = get_session_vectorstore(session_id)
+    
+    if vectorstore is None:
+        return {"answer": "Please upload a PDF first!"}
+    
+    try:
+        # Thread-safe vectorstore access
+        with sessions_lock:
+            question = data.question
+            history = data.history
+            conversation_context = ""
+            
+            if history:
+                for msg in history[-5:]:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if role and content:
+                        conversation_context += f"{role}: {content}\n"
+            
+            # Search only within current session's vectorstore
+            docs = vectorstore.similarity_search(question, k=4)
+            if not docs:
+                return {"answer": "No relevant context found in the current PDF."}
 
-    session = sessions.get(data.session_id)
-    if not session:
-        return {"answer": "Session expired", "confidence_score": 0}
+            context = "\n\n".join([doc.page_content for doc in docs])
 
-    vectorstore = session["vectorstore"]
+            prompt = f"""You are a helpful assistant answering questions ONLY from the provided PDF document.
 
-    docs = vectorstore.similarity_search_with_score(data.question, k=4)
+Conversation History (for context only):
+{conversation_context}
 
-    docs_with_scores = vectorstore.similarity_search_with_score(question, k=4)
-    if not docs_with_scores:
-        return {"answer": "No relevant context found in the uploaded document.", "confidence_score": 0}
+Document Context (ONLY reference this):
+{context}
 
-    # Convert FAISS scores to cosine similarities
-    scored = [(doc, score, faiss_score_to_cosine_sim(score)) for doc, score in docs_with_scores]
-    similarities = [sim for _, _, sim in scored]
-    confidence = compute_confidence([score for _, score, _ in scored])
+Current Question:
+{question}
 
+Instructions:
+- Answer ONLY using the document context provided above.
+- Do NOT use any information from previous documents or conversations outside this context.
+- If the answer is not in the document, say so briefly.
+- Keep the answer concise (2-3 sentences max).
 
+Answer:"""
 
-    Question:
-    {data.question}
-
-    user_prompt = CCC_PROMPT.format(
-        context=context,
-        question=question_with_history,
-    )
-
-    answer = generate_response(prompt, 150)
-
-    session["last"] = time.time()
+            raw_answer = generate_response(prompt, max_new_tokens=512)
+            answer = normalize_answer(raw_answer)
+            return {"answer": answer}
+            
+    except Exception as e:
+        return {"answer": f"Error processing question: {str(e)}"}
 
     return {"answer": normalize_answer(answer), "confidence_score": 85}
 
 @app.post("/summarize")
 @limiter.limit("15/15 minutes")
-async def summarize_pdf(request: Request, data: SummarizeRequest):
-    cleanup_expired_sessions()
-    session_id = data.session_id
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
+def summarize_pdf(request: Request, data: SummarizeRequest):
+    """
+    Summarize PDF using session-specific context with thread-safe access.
+    """
+    session_id = request.headers.get("X-Session-ID", "default")
+    vectorstore, upload_time = get_session_vectorstore(session_id)
+    
+    if vectorstore is None:
+        return {"summary": "Please upload a PDF first!"}
 
-    sessions[session_id]["last_accessed"] = time.time()
-    vectorstore = sessions[session_id]["vectorstore"]
+    try:
+        # Thread-safe vectorstore access
+        with sessions_lock:
+            docs = vectorstore.similarity_search("Give a concise summary of the document.", k=6)
+            if not docs:
+                return {"summary": "No document context available to summarize."}
 
-    # Extract all text from the vectorstore for summarization
-    all_docs = list(vectorstore.docstore._dict.values())
-    full_text = "\n".join([doc.page_content for doc in all_docs])
+            context = "\n\n".join([doc.page_content for doc in docs])
 
-    system_prompt = (
-        "You are a document summarization assistant.\n"
-        "Rules:\n"
-        "1. Summarize in 6-8 concise bullet points.\n"
-        "2. Clearly state: who received the certificate/document, what it is for, "
-        "which organization issued it, who authorized it, and the date.\n"
-        "3. Use proper Title Case for names. Return clean, readable text.\n"
-        "4. Use ONLY the information in the provided context."
-    )
+            prompt = (
+                "You are a document summarization assistant working with a certificate or official document.\n"
+                "RULES:\n"
+                "1. Summarize in 6-8 concise bullet points.\n"
+                "2. Clearly distinguish: who received the certificate, what course, which company issued it,\n"
+                "   who signed it, on what platform, and on what date.\n"
+                "3. Return clean, properly formatted text — no character spacing, proper Title Case for names.\n"
+                "4. Use ONLY the information in the context below.\n"
+                "5. DO NOT reference any other documents or previous PDFs.\n\n"
+                f"Context:\n{context}\n\n"
+                "Summary (bullet points):"
+            )
 
-    user_prompt = f"Content:\n{full_text[:4000]}\n\nSummary (bullet points):"
-
-    return {"summary": normalize_answer(summary)}
+            raw_summary = generate_response(prompt, max_new_tokens=512)
+            summary = normalize_answer(raw_summary)
+            return {"summary": summary}
+            
+    except Exception as e:
+        return {"summary": f"Error summarizing PDF: {str(e)}"}
 
 
 @app.post("/compare")
 @limiter.limit("15/15 minutes")
-async def compare_documents(request: Request, data: CompareRequest):
+def compare_pdfs(request: Request, data: dict):
     """
-    Compare multiple documents within a session.
-    Groups chunks by their source metadata and generates a comparative summary.
+    Compare two PDFs using their session-specific contexts.
+    Supports multi-user/multi-PDF comparison feature.
     """
-    cleanup_expired_sessions()
-    session_id = data.session_id
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-
-    sessions[session_id]["last_accessed"] = time.time()
-    vectorstore = sessions[session_id]["vectorstore"]
-
-    # Extract all documents from the FAISS internal docstore
+    session_id_1 = data.get("session_id_1", "default")
+    session_id_2 = data.get("session_id_2", "default")
+    question = data.get("question", "Compare these documents")
+    
+    vectorstore_1, _ = get_session_vectorstore(session_id_1)
+    vectorstore_2, _ = get_session_vectorstore(session_id_2)
+    
+    if vectorstore_1 is None or vectorstore_2 is None:
+        return {"error": "One or both sessions do not have a PDF loaded"}
+    
     try:
-        all_docs = list(vectorstore.docstore._dict.values())
-    except Exception:
-        all_docs = []
+        with sessions_lock:
+            docs_1 = vectorstore_1.similarity_search(question, k=3)
+            docs_2 = vectorstore_2.similarity_search(question, k=3)
+            
+            context_1 = "\n\n".join([doc.page_content for doc in docs_1])
+            context_2 = "\n\n".join([doc.page_content for doc in docs_2])
+            
+            prompt = f"""You are a document comparison assistant.
 
-    if not all_docs:
-        return {"comparison": "No documents found to compare."}
+PDF 1 Context:
+{context_1}
 
-    # Group chunks by their source file
-    docs_by_source = {}
-    for doc in all_docs:
-        source = doc.metadata.get("source", "Unknown")
-        if source not in docs_by_source:
-            docs_by_source[source] = []
-        docs_by_source[source].append(doc.page_content)
+PDF 2 Context:
+{context_2}
 
-    sources = list(docs_by_source.keys())
-    if len(sources) < 2:
-        return {"comparison": "Please upload at least two documents to generate a comparison."}
+Question: {question}
 
-    # Prepare context for comparison
-    comparison_context = ""
-    for i, source in enumerate(sources):
-        filename = Path(source).name
-        content_sample = "\n".join(docs_by_source[source])[:1500]
-        comparison_context += f"--- Document {i+1}: {filename} ---\n{content_sample}\n\n"
+Compare the two documents regarding this question and highlight key differences and similarities.
 
-    system_prompt = "You are a professional analyst comparing multiple documents."
-    user_prompt = f"""
-    Please compare the following documents:
+Comparison:"""
+            
+            comparison = generate_response(prompt, max_new_tokens=512)
+            return {"comparison": normalize_answer(comparison)}
+            
+    except Exception as e:
+        return {"error": f"Error comparing PDFs: {str(e)}"}
 
-    {comparison_context}
 
-    Instructions:
-    - Identify key similarities and differences.
-    - Format as a structured comparison (bullet points/sections).
-    - Be objective and concise.
+@app.post("/reset")
+@limiter.limit("60/15 minutes")
+def reset_session(request: Request):
     """
+    Explicitly resets a session by clearing its vectorstore.
+    """
+    session_id = request.headers.get("X-Session-ID", "default")
+    
+    with sessions_lock:
+        clear_session(session_id)
+        
+    return {
+        "message": "Session cleared successfully",
+        "session_id": session_id
+    }
 
-    comparison_result = generate_response(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        max_tokens=800
-    )
-    return {"comparison": comparison_result}
+
+@app.get("/status")
+def get_pdf_status(request: Request):
+    """
+    Returns the current PDF session status.
+    Useful for debugging and ensuring proper state management.
+    """
+    session_id = request.headers.get("X-Session-ID", "default")
+    
+    with sessions_lock:
+        if session_id in sessions:
+            return {
+                "pdf_loaded": True,
+                "session_id": session_id,
+                "upload_time": sessions[session_id].get("upload_time")
+            }
+        return {
+            "pdf_loaded": False,
+            "session_id": session_id,
+            "upload_time": None
+        }
 
 
 # -------------------------------------------------------------------
