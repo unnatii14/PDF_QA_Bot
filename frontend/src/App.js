@@ -138,12 +138,16 @@ function App() {
 
       setChatHistory((prev) => [
         ...prev,
-        { role: "bot", text: res.data.answer },
+        {
+          role: "bot",
+          text: res.data.answer,
+          citations: res.data.citations || []
+        },
       ]);
     } catch {
       setChatHistory((prev) => [
         ...prev,
-        { role: "bot", text: "Error getting answer." },
+        { role: "bot", text: "Error getting answer.", citations: [] },
       ]);
     }
 
@@ -257,9 +261,24 @@ function App() {
 
             <div style={{ maxHeight: 300, overflowY: "auto", marginBottom: 16 }}>
               {chatHistory.map((msg, i) => (
-                <div key={i} className="mb-2">
+                <div key={i} className="mb-3">
                   <strong>{msg.role === "user" ? "You" : "Bot"}:</strong>
                   <ReactMarkdown>{msg.text}</ReactMarkdown>
+                  {msg.role === "bot" && msg.citations && msg.citations.length > 0 && (
+                    <div className="mt-1">
+                      <small className="text-muted fw-semibold">Sources: </small>
+                      {msg.citations.map((c, j) => (
+                        <span
+                          key={j}
+                          className="badge bg-secondary me-1"
+                          title={c.source}
+                          style={{ fontSize: "0.75rem" }}
+                        >
+                          📄 {c.source} — p.{c.page}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

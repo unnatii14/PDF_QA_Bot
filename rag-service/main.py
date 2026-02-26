@@ -168,12 +168,14 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
 
         sessions[session_id] = {
             "vectorstores": [vectorstore],
+            "filename": file.filename,
             "last_accessed": time.time()
         }
 
         return {
             "message": "PDF uploaded and processed",
-            "session_id": session_id
+            "session_id": session_id,
+            "page_count": len(docs)
         }
 
     except Exception as e:
@@ -189,35 +191,68 @@ def ask_question(request: Request, data: AskRequest):
     cleanup_expired_sessions()
 
     if not data.session_ids:
-        return {"answer": "No session selected."}
+        return {"answer": "No session selected.", "citations": []}
 
-    vectorstores = []
+    # Update last_accessed for all sessions
     for sid in data.session_ids:
         session = sessions.get(sid)
         if session:
             session["last_accessed"] = time.time()
-            vectorstores.extend(session["vectorstores"])
 
-    if not vectorstores:
-        return {"answer": "No documents found for selected sessions."}
+    # Gather retrieved docs with their session filenames
+    docs_with_meta = []
+    for sid in data.session_ids:
+        session = sessions.get(sid)
+        if session:
+            vs = session["vectorstores"][0]
+            filename = session.get("filename", "unknown")
+            retrieved = vs.similarity_search(data.question, k=4)
+            for doc in retrieved:
+                docs_with_meta.append({
+                    "doc": doc,
+                    "filename": filename,
+                    "sid": sid
+                })
 
-    docs = []
-    for vs in vectorstores:
-        docs.extend(vs.similarity_search(data.question, k=4))
+    if not docs_with_meta:
+        return {"answer": "No relevant context found.", "citations": []}
 
-    if not docs:
-        return {"answer": "No relevant context found."}
+    # Build context with page annotations for the prompt
+    context_parts = []
+    for item in docs_with_meta:
+        # PyPDFLoader sets metadata["page"] as 0-indexed
+        raw_page = item["doc"].metadata.get("page", 0)
+        page_num = int(raw_page) + 1  # Convert to 1-indexed
+        context_parts.append(f"[Page {page_num}] {item['doc'].page_content}")
 
-    context = "\n\n".join([d.page_content for d in docs])
+    context = "\n\n".join(context_parts)
 
     prompt = (
-        "Answer the question using ONLY the provided context.\n\n"
+        "Answer the question using ONLY the provided context. "
+        "The context includes page references like [Page N].\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {data.question}\nAnswer:"
     )
 
     answer = generate_response(prompt, 200)
-    return {"answer": answer}
+
+    # Build deduplicated, sorted citations
+    seen = set()
+    citations = []
+    for item in docs_with_meta:
+        raw_page = item["doc"].metadata.get("page", 0)
+        page_num = int(raw_page) + 1
+        key = (item["filename"], page_num)
+        if key not in seen:
+            seen.add(key)
+            citations.append({
+                "page": page_num,
+                "source": item["filename"]
+            })
+
+    citations.sort(key=lambda c: (c["source"], c["page"]))
+
+    return {"answer": answer, "citations": citations}
 
 
 # ===============================
