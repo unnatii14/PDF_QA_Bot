@@ -65,7 +65,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "Missing sessionId." });
     }
 
-    const filePath = path.join(__dirname, req.file.path);
+    const filePath = path.resolve(req.file.path);
 
     const response = await axios.post(
       `${RAG_URL}/process-pdf`,

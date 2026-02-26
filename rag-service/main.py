@@ -17,9 +17,12 @@ from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoM
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-# Post-processing helper: strips prompt echoes / context leakage from LLM output
-# so that the API always returns only the clean, user-facing answer.
-from utils.postprocess import extract_final_answer
+# Post-processing helpers: strip prompt echoes / context leakage from LLM output
+# so that the API always returns only the clean, user-facing answer/summary/comparison.
+from utils.postprocess import extract_final_answer, extract_final_summary, extract_comparison
+
+# Centralised minimal prompt builders (short prompts → less instruction echoing).
+from utils.prompt_templates import build_ask_prompt, build_summarize_prompt, build_compare_prompt
 
 load_dotenv()
 
@@ -263,25 +266,15 @@ def ask_question(request: Request, data: AskRequest):
 
     context = "\n\n".join([doc.page_content for doc in docs])
 
-    # ── Tight prompt: answer-only, no echoing ────────────────────────────────
-    conv_block = (
-        f"Previous conversation:\n{conversation_context.strip()}\n\n"
-        if conversation_context.strip() else ""
-    )
-
-    prompt = (
-        "You are a precise question-answering assistant.\n"
-        "Read the document excerpt below and answer the question using ONLY the provided information.\n"
-        "Your response must be a short, direct answer with no extra explanation.\n"
-        "Do NOT repeat the question, context, or any instructions.\n\n"
-        f"{conv_block}"
-        f"Document excerpt:\n{context}\n\n"
-        f"Question: {question}\n\n"
-        "Answer:"
+    # ── Build minimal prompt via prompt_templates (reduces instruction echoing) ──
+    prompt = build_ask_prompt(
+        context=context,
+        question=question,
+        conversation_context=conversation_context,
     )
 
     raw_answer = generate_response(prompt, max_new_tokens=150)
-    # Post-process: remove prompt echoes / context leakage; return clean answer only.
+    # Post-process: strip any leaked prompt/context text; return clean answer only.
     clean_answer = extract_final_answer(raw_answer)
     return {"answer": clean_answer}
 
@@ -307,18 +300,12 @@ def summarize_pdf(request: Request, data: SummarizeRequest):
 
     context = "\n\n".join([doc.page_content for doc in docs])
 
-    prompt = (
-        "Summarize the following document excerpt in 5-7 clear bullet points.\n"
-        "Each bullet point must state one key fact (who, what, when, where, or why).\n"
-        "Use ONLY the information provided below. Do NOT add assumptions.\n"
-        "Do NOT repeat these instructions in your response.\n\n"
-        f"Document excerpt:\n{context}\n\n"
-        "Summary:"
-    )
+    # ── Build minimal summarization prompt ───────────────────────────────────
+    prompt = build_summarize_prompt(context=context)
 
     raw_summary = generate_response(prompt, max_new_tokens=300)
-    # Post-process: strip any leaked prompt sections from the generated summary.
-    summary = extract_final_answer(raw_summary)
+    # Post-process: strip any leaked prompt/context text from the summary.
+    summary = extract_final_summary(raw_summary)
     return {"summary": summary}
 
 
@@ -346,25 +333,14 @@ def compare_documents(request: Request, data: CompareRequest):
     for i, vs in enumerate(vectorstores):
         chunks = vs.similarity_search(query, k=4)
         text = "\n".join([c.page_content for c in chunks])
-        per_doc_contexts.append(f"Document {i + 1}:\n{text}")
+        per_doc_contexts.append(text)
 
-    combined_context = "\n\n---\n\n".join(per_doc_contexts)
-
-    prompt = (
-        "You are a document comparison assistant.\n"
-        "Compare the documents below and produce a structured comparison with:\n"
-        "1. A brief overview of each document.\n"
-        "2. Key similarities.\n"
-        "3. Key differences.\n"
-        "Base your comparison ONLY on the provided excerpts. Do NOT invent information.\n"
-        "Do NOT repeat these instructions.\n\n"
-        f"{combined_context}\n\n"
-        "Comparison:"
-    )
+    # ── Build minimal comparison prompt ───────────────────────────────────────
+    prompt = build_compare_prompt(per_doc_contexts=per_doc_contexts)
 
     raw = generate_response(prompt, max_new_tokens=400)
-    # Post-process: ensure comparison output contains no leaked prompt text.
-    comparison = extract_final_answer(raw)
+    # Post-process: strip any leaked prompt/context text from the comparison.
+    comparison = extract_comparison(raw)
     return {"comparison": comparison}
 
 
